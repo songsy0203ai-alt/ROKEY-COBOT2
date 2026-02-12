@@ -1,0 +1,29 @@
+# Python 캐시 파일
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# ROS2 빌드 및 로그 관련 (혹시 포함될 경우 대비)
+build/
+install/
+log/
+
+# 데이터셋 제외 (이미지 및 라벨)
+**/test/images/
+**/test/labels/
+**/train/images/
+**/train/labels/
+**/valid/images/
+**/valid/labels/
+
+# YOLO 및 학습 결과물 제외
+**/weights/
+**/train_2026*/
+
+# 기타 임시 파일
+.DS_Store
+.vscode/
+
+# .env 파일
+.env
+**/.env

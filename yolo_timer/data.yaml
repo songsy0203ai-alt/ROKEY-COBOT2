@@ -1,0 +1,6 @@
+train: /home/rokey/cobot_ws/src/cobot2_ws/yolo_timer/train/images
+val: /home/rokey/cobot_ws/src/cobot2_ws/yolo_timer/valid/images
+test: /home/rokey/cobot_ws/src/cobot2_ws/yolo_timer/test/images
+
+nc: 4
+names: ['timer 7', 'timer 8', 'timer 2', 'timer 6']

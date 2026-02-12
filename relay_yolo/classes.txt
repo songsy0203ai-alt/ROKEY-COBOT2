@@ -1,0 +1,11 @@
+person
+timer 6
+timer 7
+timer 8
+timer 2
+relay 3
+relay 4
+relay 5
+relay 6
+relay 7
+relay 8
