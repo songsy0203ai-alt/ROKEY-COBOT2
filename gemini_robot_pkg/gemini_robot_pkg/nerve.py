@@ -1,3 +1,5 @@
+# /home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/gemini_robot_pkg/nerve.py
+
 """
 - [코드 기능]: 
     1. GeminiNerve: 호모그래피 행렬 연산 및 파일 I/O 담당 (Utility Class)

@@ -1,3 +1,5 @@
+# /home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/gemini_robot_pkg/brain.py
+
 """
 - [코드 기능]: 
     1. 초기 10초간 '스캔 모드'를 통해 작업 공간 내 단자, 도구, 손바닥 좌표를 수집하여 DB화함.
