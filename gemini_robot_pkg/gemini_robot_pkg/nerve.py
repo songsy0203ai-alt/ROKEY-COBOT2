@@ -1,8 +1,4 @@
-<<<<<<< HEAD
-# gemini_robot_pkg/gemini_robot_pkg/nerve.py
-=======
 # /home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/gemini_robot_pkg/nerve.py
->>>>>>> 66a82552cbdf12daf76af50fda1379f9c49ee5eb
 
 """
 - [코드 기능]: 

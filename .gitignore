@@ -9,16 +9,16 @@ install/
 log/
 
 # 데이터셋 제외 (이미지 및 라벨)
-**/test/images/
-**/test/labels/
-**/train/images/
-**/train/labels/
-**/valid/images/
-**/valid/labels/
+# **/test/images/
+# **/test/labels/
+# **/train/images/
+# **/train/labels/
+# **/valid/images/
+# **/valid/labels/
 
 # YOLO 및 학습 결과물 제외
-**/weights/
-**/train_2026*/
+# **/weights/
+# **/train_2026*/
 
 # 기타 임시 파일
 .DS_Store
