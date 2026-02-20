@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+[코드 기능]
+- RealSense 카메라를 통해 작업 영역의 이미지를 획득하고 Gemini Vision AI를 사용하여 나사 구멍의 2D 픽셀 좌표를 추출합니다.
+- 획득한 픽셀 좌표와 Depth 정보를 바탕으로 3D 공간 좌표($x, y, z$)를 계산하고, 로봇 베이스 좌표계로 변환합니다.
+- Doosan 로봇(m0609)을 제어하여 드라이버 픽업, 목표 지점 이동, 힘 제어 기반의 접촉 감지 및 나사 체결 작업을 수행합니다.
+
+[입력(Input)]
+1. RealSense Camera Stream: 컬러 이미지(RGB) 및 깊이 정보(Depth).
+2. Gemini API Response: 이미지 내 목표 지점의 픽셀 좌표 [x, y].
+3. Robot State/Sensor: 로봇의 현재 관절 각도, 말단 장치(TCP) 위치, 가해지는 힘(Force) 데이터.
+4. ROS 2 Topics: /start (작업 시작 신호), /stop_request (긴급 정지 신호).
+
+[출력(Output)]
+1. Robot Motion: 로봇 팔의 물리적 이동 및 그리퍼/드라이버 조작.
+2. ROS 2 Topics: /m0609/job_event (JSON 형식의 작업 로그), /first (작업 완료 신호 - Bool).
+"""
+
 import rclpy
 import DR_init
 import time
@@ -181,8 +198,8 @@ def perform_screw_task(node, finish_pub, log_pub, get_robot_state):
     P_SCAN = posj(0, 0, 90, 0, 90, 0) 
     
     # 드라이버 픽업 위치
-    P_TOOL_PICK = posx(431.01, 221.37, 282.923, 180, 180, 180)
-    P_TOOL_PICK_DOWN = posx(431.01, 221.37, 84.923, 180, 180, 180)
+    P_TOOL_PICK = posx(424.62, 224.29, 392.75, 22.57, -179.38, 21.95)
+    P_TOOL_PICK_DOWN = posx(424.62, 224.29, 192.75, 22.57, -179.38, 21.95)
 
     publish_log(node, log_pub, "INFO", "TASK", "TASK.START", "Gemini 연동 작업 시작")
 
