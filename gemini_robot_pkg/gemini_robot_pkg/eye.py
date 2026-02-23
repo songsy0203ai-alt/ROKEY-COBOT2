@@ -42,11 +42,18 @@ class IntegratedEyeNode(Node):
         # 3. ROS2 통신 및 카메라 설정
         self.coord_pub = self.create_publisher(String, '/eye/terminal_centers', 10)
         self.bridge = CvBridge()
-        self.cap = cv2.VideoCapture(6) # Realsense 카메라 인덱스 유지
+        self.cap = cv2.VideoCapture(1)
         
-        # 10Hz 주기로 추론 프로세스 가동
+        # --- 창 사이즈 조절 설정 추가 ---
+        self.window_name = "Multi-Model Detection (Timer/Relay/Lamp/Switch/Power)"
+        # WINDOW_NORMAL: 사용자가 마우스로 창 크기를 조절 가능하게 함
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL) 
+        # 초기 실행 시 보여줄 창의 크기 설정 (가로, 세로)
+        cv2.resizeWindow(self.window_name, 1280, 720) 
+        # ------------------------------
+
         self.timer = self.create_timer(0.1, self.inference_callback) 
-        self.get_logger().info("Integrated Eye Node 가동: 5종 모델 동시 탐지 중...")
+        self.get_logger().info("Integrated Eye Node 가동: 창 사이즈 조절 활성화됨")
 
     def inference_callback(self):
         """
@@ -85,7 +92,8 @@ class IntegratedEyeNode(Node):
         self.coord_pub.publish(msg)
 
         # 통합 시각화 결과 출력
-        cv2.imshow("Multi-Model Detection (Timer/Relay/Lamp/Switch/Power)", frame)
+        cv2.imshow(self.window_name, frame)
+        
         if cv2.waitKey(1) & 0xFF == ord('q'):
             self.destroy_node()
 

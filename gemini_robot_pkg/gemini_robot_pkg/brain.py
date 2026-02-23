@@ -1,12 +1,20 @@
 # /home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/gemini_robot_pkg/brain.py
 
 """
-- [코드 기능]: 
-    1. 초기 10초간 '스캔 모드'를 통해 작업 공간 내 단자, 도구, 손바닥 좌표를 수집하여 DB화함.
-    2. 스캔 완료 후, API 쿼터 보호를 위해 20초 주기로 회로도 분석 및 협업 시퀀스 수행.
-    3. 정규화된 좌표([y, x])를 신경 노드(nerve.py)로 발행.
-- [입력(Input)]: /eye/terminal_centers (실시간 YOLO 탐지 데이터)
-- [출력(Output)]: /brain/normalized_coords (Gemini가 결정한 목표 정규화 좌표)
+[코드 기능]
+- Doosan M0609 협동 로봇의 의사결정 체계(Brain)를 담당하는 ROS2 노드입니다.
+- 환경 스캔(Eye), 음성 명령(Ear) 데이터를 취합하여 Gemini AI 모델에 전달하고, 
+  회로도 분석을 통해 최적의 결선 작업 단자를 결정합니다.
+- 사용자 승인(Mouth/Ear) 절차를 거쳐 최종 좌표를 하위 제어 노드(Nerve)로 전송합니다.
+
+[입력(Input)]
+1. /eye/terminal_centers (std_msgs/String): 카메라를 통해 탐지된 단자들의 라벨 및 정규화된 좌표 (JSON 형식).
+2. /ear/speech_text (std_msgs/String): 사용자의 음성 명령 텍스트.
+3. 이미지 파일: PLC 회로도, 릴레이 회로도, 타이머 회로도 (Local Path).
+
+[출력(Output)]
+1. /brain/normalized_coords (std_msgs/String): 승인된 작업 대상 단자의 라벨 및 [y, x] 좌표 (JSON 리스트).
+2. /mouth/speech_text (std_msgs/String): 로봇이 사용자에게 보내는 질문 및 상태 안내 텍스트.
 """
 
 import rclpy
@@ -24,192 +32,184 @@ class BrainNode(Node):
     def __init__(self):
         super().__init__('brain_node')
         
-        # 1. Gemini API 설정 (Robotics ER 프리뷰 모델 사용)
-        self.api_key = "AIzaSyA0AOB7tjo1NSuJx-s_AIKmFv36icA_sM8" # cobot2 라는 api key 입력하면 됨 ㅇㅇ
+        # 1. Gemini API 설정
+        # API 키와 모델 이름을 설정하여 멀티모달 추론 환경을 준비합니다.
+        self.api_key = "AIzaSyA0AOB7tjo1NSuJx-s_AIKmFv36icA_sM8"
         self.client = genai.Client(api_key=self.api_key)
         self.model_name = "gemini-robotics-er-1.5-preview"
         
-        # 2. 데이터 저장소 및 상태 관리
-        self.object_db = {}          # 10초간 수집된 객체별 고정 좌표 저장소
-        self.is_scanning = True      # 현재 스캔 모드 여부
-        self.scan_duration = 15.0    # 스캔 지속 시간 (초)
-        self.reasoning_interval = 20.0 # [중요] 쿼터 초과 방지를 위한 20초 주기 (분당 3회 호출)
+        # 2. 상태 관리 및 데이터 저장소
+        # 로봇의 현재 공정 상태를 관리하며, 시각 데이터를 저장하는 DB와 명령 변수를 초기화합니다.
+        self.state = 'SCANNING' # 초기 상태: 주변 환경 스캔
+        self.object_db = {}     # '라벨': [y, x] 형태의 탐지 데이터 저장
+        self.current_proposed_task = None 
+        self.last_user_command = "현재 특별한 명령 없음. 회로도에 근거하여 최적의 결선 순서를 결정해."
+            # last_user_command는 사용자가 아직 별다른 말(예: '중단해', '6번부터 해')을 하지 않았으니, 
+            # "너는 기본적으로 도면에 적힌 원칙대로 순서를 짜라"고 Gemini에게 가이드라인을 주는 텍스트일 뿐입니다.
+        
+        # 스캔 유지 시간 설정 (15초간 Eye 데이터를 수집)
+        self.scan_duration = 15.0
         self.start_time = self.get_clock().now()
         
         # 3. ROS2 통신 설정
-        self.subscription = self.create_subscription(
-            String, '/eye/terminal_centers', self.terminal_callback, 10
-        )
+        # 외부 노드로부터 데이터를 받고(Sub), 결정된 명령을 전달(Pub)하기 위한 인터페이스 정의
+        self.eye_sub = self.create_subscription(String, '/eye/terminal_centers', self.eye_callback, 10)
+        self.ear_sub = self.create_subscription(String, '/ear/speech_text', self.ear_callback, 10)
         self.coord_pub = self.create_publisher(String, '/brain/normalized_coords', 10)
+        self.mouth_pub = self.create_publisher(String, '/mouth/speech_text', 10)
         
-        # 4. 리소스 경로
-        self.circuit_diagram_path = os.path.expanduser(
-            '/home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/resource/plc_circuit.png'
-        )
+        # 4. 리소스 경로 설정
+        # 회로도 분석을 위해 Gemini에게 전달할 참조 이미지 경로를 설정합니다.
+        self.circuit_diagram_path = os.path.expanduser('/home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/resource/plc_circuit.png')
+        self.relay_diagram_path = os.path.expanduser('/home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/resource/relay_circuit.jpg')
+        self.timer_diagram_path = os.path.expanduser('/home/ssy/cobot_ws/src/cobot2_ws/gemini_robot_pkg/resource/timer_circuit.jpg')
         
-        # 5. 제어 루프 (스캔 확인 및 추론 실행)
-        # 초기에는 1초마다 스캔 종료 여부 체크
+        # 5. 제어 루프 타이머
+        # 1초 주기로 현재 상태를 점검하고 상태 전이를 관리합니다.
         self.timer = self.create_timer(1.0, self.control_loop)
         
-        self.get_logger().info("[Brain 노드] 가동: 15초간 주변 환경 스캔 후 쿼터 보호 모드로 전환합니다.")
+        self.get_logger().info(f"[Brain 노드] 초기화 완료. 현재 상태: {self.state}")
 
-    def terminal_callback(self, msg):
-        """실시간 YOLO 탐지 정보를 수신하여 스캔 모드일 경우 DB 업데이트"""
+    def eye_callback(self, msg):
+        """
+        [Input] msg: eye.py에서 Yolo로 탐지된 객체의 라벨과 좌표가 포함된 JSON 문자열
+        [Output] None (클래스 내부 self.object_db(단자별 좌표 데이터베이스. Gemini가 작업 환경 공간을 이해하는데 쓰임.) 업데이트)
+        기능: 카메라 노드(Eye)에서 오는 실시간 좌표 데이터를 로봇의 기억 장치(object_db)에 갱신합니다.
+        """
         try:
             detections = json.loads(msg.data)
-            if self.is_scanning:
-                for item in detections:
-                    label = item['label']
-                    point = item['point']
-                    self.object_db[label] = point
+            for item in detections:
+                self.object_db[item['label']] = item['point']
         except Exception as e:
-            self.get_logger().error(f"Callback Error: {e}")
+            self.get_logger().error(f"Eye Callback Error: {e}")
+
+    def ear_callback(self, msg):
+        """
+        [Input] msg: 사용자의 음성 발화 텍스트
+        [Output] None (상태 전환 및 execute_task 호출 제어)
+        기능: 사용자의 답변을 분석하여 로봇의 제안을 승인할지, 아니면 다시 추론할지 결정합니다.
+        """
+        user_talk = msg.data.strip()
+        self.get_logger().info(f"👂 사용자 음성 수신: {user_talk} (현재 상태: {self.state})")
+
+        # 로봇이 질문을 던지고 답변을 기다리는 상태인 경우
+        if self.state == 'WAITING_APPROVAL':
+            # 긍정 표현이 포함된 경우 작업을 실행함
+            if any(word in user_talk for word in ["응", "어", "그래", "작업해", "오케이", "수행해"]):
+                self.get_logger().info("✅ 승인 확인. 로봇에게 좌표를 전송합니다.")
+                self.execute_task()
+             
+            # 부정 또는 수정 표현이 포함된 경우 다시 분석함
+            elif any(word in user_talk for word in ["아니", "하지마", "말고", "다른거"]):
+                self.get_logger().warn("❌ 거절 또는 수정 요청 수신. 재분석을 시작합니다.")
+                self.last_user_command = user_talk
+                self.reasoning_step()
+        
+        else:
+            # 기타 상황에서는 사용자의 말을 기록하여 다음 추론의 맥락으로 활용
+            self.last_user_command = user_talk
 
     def control_loop(self):
-        """스캔 완료 여부를 체크하고 모드를 전환함"""
+        """
+        [Input/Output] None
+        기능: 노드의 주기적 상태 점검. SCANNING 시간이 종료되면 REASONING 단계로 자동 전환합니다.
+        """
         now = self.get_clock().now()
         elapsed_time = (now - self.start_time).nanoseconds / 1e9
         
-        if self.is_scanning:
+        if self.state == 'SCANNING':
             if elapsed_time < self.scan_duration:
                 self.get_logger().info(f"환경 스캔 중... ({elapsed_time:.1f}s / {self.scan_duration}s)")
             else:
-                self.is_scanning = False
-                self.get_logger().info("--- 스캔 완료: 환경 정보가 고정되었습니다. ---")
-                self.get_logger().info(f"수집된 객체 리스트: {list(self.object_db.keys())}")
-                
-                # 스캔 종료 후 타이머를 20초 주기로 재설정 (쿼터 보호 핵심)
-                self.timer.cancel()
-                self.timer = self.create_timer(self.reasoning_interval, self.reasoning_step)
-                
-                # 대기 없이 즉시 첫 번째 추론 실행
+                self.get_logger().info("--- 스캔 완료: 추론 단계로 진입합니다. ---")
                 self.reasoning_step()
-        
+
     def reasoning_step(self):
-        """저장된 Object DB를 기반으로 회로도 분석 및 다음 좌표 결정"""
+        """
+        [Input] self.object_db, 회로도 이미지, 사용자 명령 텍스트
+        [Output] None (Mouth 노드로 질문 텍스트 송신)
+        기능: Gemini AI에 회로도와 현재 환경 정보를 전달하여 다음 작업 타겟을 결정하고 사용자에게 묻습니다.
+        """
         if not self.object_db:
-            self.get_logger().warn("저장된 환경 정보가 없습니다. 스캔 실패 가능성.")
+            self.get_logger().warn("저장된 환경 정보가 없습니다. 스캔 데이터를 기다립니다.")
             return
 
+        self.state = 'REASONING'
         try:
-            self.get_logger().info("Gemini에게 다음 협업 단계를 묻는 중... (API 호출)")
+            self.get_logger().info("Gemini에게 작업 시퀀스 분석 요청 중...")
+            # 회로도 이미지 로드
             circuit_img = PIL.Image.open(self.circuit_diagram_path)
-            
-            # 프롬프트 초안 _ 영어
-            # prompt = f"""
-            # You are the collaborative intelligence of a Doosan M0609 robot. 
-            # Perform PLC circuit wiring tasks based on the pre-scanned [Environment Data] below.
+            relay_img = PIL.Image.open(self.relay_diagram_path)
+            timer_img = PIL.Image.open(self.timer_diagram_path)
 
-            # [Environment Data (Fixed Coordinates)]:
-            # {json.dumps(self.object_db, indent=2)}
-
-            # [Instructions]:
-            # 1. Analyze the circuit diagram to find the terminal (e.g., timer 2, relay 6) for the current wiring sequence.
-            # 2. Retrieve the [y, x] coordinates for the **exactly matching label** from the [Environment Data].
-            # 3. If you need to deliver a screwdriver to a human, utilize the 'screwdriver' and 'palm' coordinates.
-            # 4. The output MUST be provided ONLY in the following JSON format: [{{"point": [y, x], "label": "label_name"}}]
-            # """
-
-            # ==================================================================================
-
-            # 프롬프트 초안 _ 한국어
-            # prompt = f"""
-            # 너는 Doosan M0609 로봇의 협업 지능이야. 
-            # 미리 스캔된 아래의 [환경 데이터]를 기반으로 PLC 회로도 작업을 수행해.
-
-            # [환경 데이터 (고정 좌표)]:
-            # {json.dumps(self.object_db, indent=2)}
-
-            # [수행 지침]:
-            # 1. 회로도에서 현재 결선 순서에 맞는 단자(예: timer 2, relay 6)를 찾아.
-            # 2. [환경 데이터]에서 해당 단자와 **정확히 일치하는 label**의 좌표를 가져와.
-            # 3. 인간에게 드라이버를 전달해야 할 경우 'screwdriver'와 'palm' 좌표를 활용해.
-            # 4. 결과는 반드시 [{{"point": [y, x], "label": "라벨명"}}] 형식의 JSON으로만 답해.
-            # """
-
-            # ==================================================================================
-
-            # 프롬프트 v2 _ 한국어
-            # prompt = f"""
-            # 너는 Doosan M0609 로봇의 협업 지능이야. 
-            # 제공된 PLC 회로도를 분석하여 [환경 데이터]에 포함된 모든 단자들의 전체 결선 작업 순서를 결정해줘.
-
-            # [환경 데이터 (고정 좌표)]:
-            # {json.dumps(self.object_db, indent=2)}
-
-            # [수행 지침]:
-            # 1. 회로도와 [환경 데이터]를 대조하여, 작업해야 할 모든 단자들의 논리적인 작업 순서를 정해.
-            # 2. 인간에게 드라이버를 전달해야 할 시점이 있다면 'screwdriver'와 'palm' 위치도 순서에 포함시켜.
-            # 3. 결과는 반드시 작업 순서대로 정렬된 [{{"step": 1, "label": "라벨명", "point": [y, x]}}, ...] 형식의 JSON으로만 답해.
-            # """
-
-            # ==================================================================================
-            
-            # 프롬프트 v3 _ 한국어
-
+            # AI에게 전달할 프롬프트 구성 (환경 데이터와 사용자 의도 포함)
             prompt = f"""
             너는 Doosan M0609 로봇의 협업 지능이야. 
-            제공된 PLC 회로도를 분석하여 [환경 데이터]에 포함된 단자들의 전체 결선 작업 순서를 결정해줘.
+            제공된 PLC 회로도와 [환경 데이터], 그리고 [사용자의 음성 명령]을 종합하여 단 하나의 최우선 작업 단자를 결정해.
 
-            [회로도 컴포넌트 - 실제 단자 라벨 매핑 정보]:
-            - 푸시버튼 (PB1): PB1(1), PB1(2)
-            - 푸시버튼 (PB2): PB2(1), PB2(2)
-            - 푸시버튼 (PB3): PB3(1), PB3(2)
-            - 릴레이 (R): relay 4, relay 3, relay 8, relay 5, relay 6, relay 7
-            - 타이머 (T): timer 6, timer 7, timer 2, timer 8
-            - 램프 (L1): L1(1), L1(2)
-            - 램프 (L2): L2(1), L2(2)
-            - 램프 (L3): L3(1), L3(2)
-            - Plus 전원 (Power1): Power(1)
-            - Minus 전원 (Power2) : Power(2)
+            [사용자의 최근 음성 명령]: "{self.last_user_command}" # Gemini가 공간 추론 및 환경 이해를 수행하도록 명령
+            [환경 데이터]: {json.dumps(self.object_db, indent=2)}
 
-            [환경 데이터 (현재 로봇이 알고 있는 좌표)]:
-            {json.dumps(self.object_db, indent=2)}
-
-            [결선 순서 결정 원칙]:
-            1. 회로도 도면을 기준으로 **왼쪽에서 오른쪽으로, 위에서 아래로** 흐르는 결선 순서를 준수해.
-            2. 위 매핑 정보를 참조하여 회로도 상의 기호가 [환경 데이터]의 어떤 라벨에 해당하는지 정확히 파악해.
-            3. 인간 작업자가 드라이버를 필요로 하는 시점에는 'screwdriver'와 'palm' 좌표를 작업 순서 사이에 포함시켜.
-            4. 결과는 반드시 작업 순서대로 정렬된 아래 JSON 리스트 형식으로만 답해:
-               [{{"step": 1, "label": "라벨명", "point": [y, x]}}, ...]
+            [수행 지침]:
+            1. 사용자의 음성 명령이 있다면 최우선으로 반영해.
+            2. 결과는 반드시 아래의 JSON 리스트 형식으로만 답해. 텍스트 설명은 생략해.
+               [{{"step": 1, "label": "라벨명", "point": [y, x]}}]
             """
 
+            # Gemini 멀티모달 추론 실행
             response = self.client.models.generate_content(
                 model=self.model_name,
-                contents=[circuit_img, prompt],
-                config=types.GenerateContentConfig(
-                    temperature=0.0,
-                    thinking_config=types.ThinkingConfig(thinking_budget=200)
-                )
+                contents=[circuit_img, prompt, relay_img, timer_img],
+                config=types.GenerateContentConfig(temperature=0.0)
             )
             
-            # JSON 추출 및 퍼블리싱 (nerve.py 전송)
+            # 응답에서 JSON 데이터만 추출
             json_match = re.search(r'\[\s*\{.*\}\s*\]', response.text, re.DOTALL)
             if json_match:
-                try:
-                    result_data = json.loads(json_match.group())
+                result_data = json.loads(json_match.group())
+                if result_data:
+                    self.current_proposed_task = result_data[0]
+                    label = self.current_proposed_task.get('label', '알 수 없는 단자')
                     
-                    # [추가] 터미널에 전체 작업 시퀀스 요약 출력
-                    sequence_labels = [item.get('label', 'N/A') for item in result_data]
-                    self.get_logger().info(f"★★★ 확정된 전체 작업 시퀀스 ★★★: {' -> '.join(sequence_labels)}")
+                    # 사용자에게 확인 질문 전송 (Mouth 노드 연동)
+                    speech_msg = String()
+                    speech_msg.data = f"{label} 작업을 진행할까요?"
+                    self.mouth_pub.publish(speech_msg)
                     
-                    # nerve.py로 전체 리스트 전송
-                    result_msg = String()
-                    result_msg.data = json_match.group()
-                    self.coord_pub.publish(result_msg)
-                except Exception as json_err:
-                    self.get_logger().error(f"JSON 파싱 에러: {json_err}")
+                    self.state = 'WAITING_APPROVAL'
+                    self.get_logger().info(f"질문 송신 완료: {label}. 승인을 기다립니다.")
             else:
-                self.get_logger().warn("Gemini의 응답에서 JSON 형식을 찾을 수 없습니다.")
+                self.get_logger().error("Gemini 응답에서 유효한 JSON을 찾지 못했습니다.")
+                self.state = 'IDLE'
 
         except Exception as e:
-            # 429 에러 발생 시 로그 출력 후 다음 주기 대기
-            if "429" in str(e):
-                self.get_logger().error("API 쿼터가 초과되었습니다. 다음 호출까지 대기합니다.")
-            else:
-                self.get_logger().error(f"Reasoning Error: {e}")
+            self.get_logger().error(f"Reasoning Error: {e}")
+            self.state = 'IDLE'
+
+    def execute_task(self):
+        """
+        [Input] self.current_proposed_task (Gemini가 결정한 데이터)
+        [Output] None (Nerve 노드로 Gemini 식으로 정규화 된 좌표 데이터 송신)
+        기능: 사용자가 승인한 단자의 좌표 정보(Gemini 식으로 정규화 된 좌표)를 최종적으로 물리 제어 노드(Nerve)에 전달합니다.
+        """
+        if self.current_proposed_task:
+            self.state = 'EXECUTING'
+            
+            # Nerve 노드가 인식할 수 있는 JSON 리스트 형식으로 좌표 데이터 직렬화
+            result_msg = String()
+            result_msg.data = json.dumps([self.current_proposed_task])
+            self.coord_pub.publish(result_msg)
+            
+            self.get_logger().info(f"🚀 실행 명령 전송됨: {self.current_proposed_task['label']}")
+            
+            # 상태 초기화 및 다음 대기 상태로 전환
+            self.last_user_command = "현재 특별한 명령 없음."
+            self.state = 'IDLE' 
+        else:
+            self.get_logger().error("실행할 작업 정보가 없습니다.")
 
 def main(args=None):
+    # ROS2 노드 초기화 및 실행
     rclpy.init(args=args)
     node = BrainNode()
     try:

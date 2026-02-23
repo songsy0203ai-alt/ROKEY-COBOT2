@@ -33,6 +33,12 @@ setup(
             'eye = gemini_robot_pkg.eye:main',
             'brain = gemini_robot_pkg.brain:main',
             'nerve = gemini_robot_pkg.nerve:main',
+            'muscle = gemini_robot_pkg.muscle:main',
+            'mouth = gemini_robot_pkg.mouth:main',
+            'ear = gemini_robot_pkg.ear:main',
+            'eye_test = gemini_robot_pkg.eye_test:main',
+            'muscle_motion_test = gemini_robot_pkg.muscle_motion_test:main',
+            'test_yolo_real_pick_relay = gemini_robot_pkg.test_yolo_real_pick_relay:main',
         ],
     },
 )
